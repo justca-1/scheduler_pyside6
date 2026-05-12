@@ -1,0 +1,4 @@
+*Pro Tip
+If you ever plan to distribute this app as a single .exe file for other users who don't have Python installed, you will eventually want to install pyinstaller. It bundles your code, your venv libraries, and your SQLite database into one clickable file.
+
+Would you like me to write a small test script using pytest to make sure your conflict detection logic is 100% accurate before we build the rest of the UI?

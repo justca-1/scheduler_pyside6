@@ -1,0 +1,19 @@
+# Python virtual environments
+venv/
+.venv/
+.env/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Qt/PySide/Build files
+*.log
+*.tmp
+build/
+dist/
+*.spec
+
+# OS files
+.DS_Store
+Thumbs.db

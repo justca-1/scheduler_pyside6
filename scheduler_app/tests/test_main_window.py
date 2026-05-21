@@ -1,6 +1,43 @@
 import sys
 import os
-import pytest
+
+class DummyMeta(type):
+    def __getattr__(cls, name):
+        return Dummy
+    def __or__(cls, other):
+        return Dummy
+    def __and__(cls, other):
+        return Dummy
+    def __xor__(cls, other):
+        return Dummy
+    def __invert__(cls):
+        return Dummy
+
+class Dummy(metaclass=DummyMeta):
+    def __init__(self, *args, **kwargs):
+        pass
+    def __call__(self, *args, **kwargs):
+        return Dummy()
+    def __getattr__(self, name):
+        return Dummy()
+    def __or__(self, other):
+        return self
+    def __and__(self, other):
+        return self
+    def __xor__(self, other):
+        return self
+    def __invert__(self):
+        return self
+
+class MockModule:
+    def __getattr__(self, name):
+        return Dummy
+
+# Robust PySide6 Mocking to avoid AttributeError on inherited classes
+sys.modules['PySide6'] = MockModule()
+sys.modules['PySide6.QtWidgets'] = MockModule()
+sys.modules['PySide6.QtGui'] = MockModule()
+sys.modules['PySide6.QtCore'] = MockModule()
 
 # Ensure 'src' is in the python path so we can import our modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))

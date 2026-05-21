@@ -1,7 +1,12 @@
+import sys
+import os
 import pytest
 import sqlite3
 
-from scheduler_app.src.engine import ScheduleEngine
+# Ensure 'src' is in the python path so we can import our modules
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+
+from engine import ScheduleEngine
 
 @pytest.fixture
 def temp_db_path(tmp_path):

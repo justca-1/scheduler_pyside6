@@ -19,5 +19,9 @@ python -m PyInstaller ^
 --add-data "scheduler_app\src\ui\icons;ui\icons" ^
 scheduler_app\src\main.py
 
+echo Building Windows Installer with Inno Setup...
+:: This compiles the installer.iss file automatically
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
 echo Done!
 pause

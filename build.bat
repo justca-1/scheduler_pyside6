@@ -15,6 +15,8 @@ python -m PyInstaller ^
 --clean ^
 --collect-all PySide6 ^
 --paths=scheduler_app\src ^
+--add-data "scheduler_app\src\ui\*.qss;ui" ^
+--add-data "scheduler_app\src\ui\icons;ui\icons" ^
 scheduler_app\src\main.py
 
 echo Done!

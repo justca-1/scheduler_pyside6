@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QTableWidget, 
+    QMainWindow, QWidget, QVBoxLayout, QTableWidget, QGridLayout,
     QTableWidgetItem, QPushButton, QHBoxLayout, QHeaderView, QLabel, QMessageBox, QSplitter, QLineEdit, QTabWidget, QListWidget, QListWidgetItem, QStackedWidget, QAbstractItemView,
     QGraphicsBlurEffect, QInputDialog, QMenu, QComboBox, QTreeWidget, QTreeWidgetItem
 )
@@ -17,6 +17,91 @@ try:
 except ImportError:
     from dialogs import AddPersonDialog, AddScheduleDialog, PersonScheduleDialog, AddClassDialog
     from navigation import NavigationPanel
+
+class ClassBlockWidget(QLabel):
+    """Custom widget representing a scheduled subject block."""
+    
+    clicked = Signal(object) # Signal carrying the schedule dictionary
+    
+    def __init__(self, text, bg_color, text_color, schedule_info=None, parent=None):
+        super().__init__(text, parent)
+        self.schedule_info = schedule_info
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor) # Adds standard hover cursor
+        self.setStyleSheet(f"""
+            background-color: {bg_color};
+            border: 1px solid rgba(0,0,0,0.2);
+            border-radius: 4px;
+            color: {text_color};
+            font-size: 11px;
+            font-weight: bold;
+        """)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.schedule_info)
+        super().mousePressEvent(event)
+
+class FlexibleGridWidget(QWidget):
+    """A layout-based calendar grid allowing fractional minute slots."""
+    block_clicked = Signal(object)
+    
+    def __init__(self):
+        super().__init__()
+        self.grid = QGridLayout(self)
+        self.grid.setSpacing(2)
+        
+        self.START_HOUR = 6
+        self.RESOLUTION_MINS = 15
+        self.init_headers()
+        
+    def time_to_row(self, time_str: str) -> int:
+        hours, minutes = map(int, time_str.split(':'))
+        total_minutes = ((hours - self.START_HOUR) * 60) + minutes
+        return total_minutes // self.RESOLUTION_MINS
+        
+    def duration_to_span(self, duration_mins: int) -> int:
+        return max(1, duration_mins // self.RESOLUTION_MINS)
+        
+    def init_headers(self):
+        self.days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        for col_idx, day in enumerate(self.days, start=1):
+            header = QLabel(day)
+            header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            header.setStyleSheet("font-weight: bold; color: gray; padding: 5px;")
+            self.grid.addWidget(header, 0, col_idx)
+            
+        # Print fixed hourly slots on the far left column
+        for hour_offset in range(13): # 06:00 to 18:00
+            current_hour = self.START_HOUR + hour_offset
+            time_label = QLabel(f"{current_hour:02d}:00")
+            time_label.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+            time_label.setStyleSheet("color: gray; border-top: 1px solid #DDD; padding-top: 5px;")
+            
+            start_row = 1 + (hour_offset * (60 // self.RESOLUTION_MINS))
+            row_span = 60 // self.RESOLUTION_MINS
+            self.grid.addWidget(time_label, start_row, 0, row_span, 1)
+
+    def clear_blocks(self):
+        for i in reversed(range(self.grid.count())):
+            item = self.grid.itemAt(i)
+            if item:
+                widget = item.widget()
+                if widget and isinstance(widget, ClassBlockWidget):
+                    widget.setParent(None)
+                    widget.deleteLater()
+                    
+    def add_class(self, day_str: str, start_time: str, duration_mins: int, display_text: str, bg_color: str, text_color: str, tooltip: str, schedule_info: dict = None):
+        if day_str not in self.days: return
+        col = self.days.index(day_str) + 1
+        start_row = 1 + self.time_to_row(start_time)
+        row_span = self.duration_to_span(duration_mins)
+        
+        block = ClassBlockWidget(display_text, bg_color, text_color, schedule_info)
+        block.setToolTip(tooltip)
+        block.clicked.connect(self.block_clicked.emit)
+        self.grid.addWidget(block, start_row, col, row_span, 1)
 
 class MainWindow(QMainWindow):
     def __init__(self, engine):
@@ -224,29 +309,11 @@ class MainWindow(QMainWindow):
                 item.setForeground(QBrush(conflict_text_color))
                 
         # 2. Update Grade Views (Schedule Grids)
-        conflict_bg_color = QColor("#FF8A80" if is_dark else "#FF7043")
-        text_color = QColor("#FFFFFF") if is_dark else QColor("#2c3e50")
-        
-        for view_data in self.grade_views.values():
-            grid = view_data['grid']
-            for r in range(grid.rowCount()):
-                for c in range(grid.columnCount()):
-                    item = grid.item(r, c)
-                    if item:
-                        text = item.text()
-                        if "⚠️ CONFLICT" in text:
-                            item.setBackground(QBrush(conflict_bg_color))
-                            item.setForeground(QBrush(QColor("white")))
-                        else:
-                            # Extract subject from tooltip to determine original color
-                            tooltip = item.toolTip()
-                            subject = ""
-                            if tooltip and tooltip.startswith("Subject: "):
-                                subject = tooltip.split("\n")[0].replace("Subject: ", "")
-                            
-                            bg_color = self.get_subject_color(subject)
-                            item.setBackground(QBrush(bg_color))
-                            item.setForeground(QBrush(text_color))
+        for grade in self.grade_views.keys():
+            filter_to_apply = None
+            if self.current_section_filter and self.current_section_filter.startswith(grade):
+                filter_to_apply = self.current_section_filter
+            self.refresh_grade_grid(grade, filter_to_apply)
 
     def init_person_management_ui(self):
         self.staff_tab = QWidget()
@@ -381,40 +448,86 @@ class MainWindow(QMainWindow):
                 self.show_message("All schedules cleared.")
 
     def export_to_csv(self):
-        """Exports the current grid exactly as seen to a CSV file."""
+        """Exports the visible schedule grid(s) to a CSV file."""
         import csv
         from PySide6.QtWidgets import QFileDialog
 
-        # Get the currently visible grid from the tabs
-        current_grid = self.main_stack.currentWidget()
-        
-        # Handle the Grade View container case (if it's a widget with a grid inside)
-        if isinstance(current_grid, QWidget) and not isinstance(current_grid, QTableWidget):
-            current_grid = current_grid.findChild(QTableWidget)
-
-        if not current_grid or not isinstance(current_grid, QTableWidget):
-            self.show_message("No schedule grid available to export.")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Schedule", "", "CSV Files (*.csv)")
+        if not path:
             return
 
-        path, _ = QFileDialog.getSaveFileName(self, "Export Schedule", "", "CSV Files (*.csv)")
-        if path:
-            try:
-                with open(path, mode='w', newline='', encoding='utf-8') as file:
-                    writer = csv.writer(file)
-                    # Write Headers
-                    headers = ["Time"] + ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        try:
+            with open(path, mode='w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+
+                # Determine what to export based on what the user is currently looking at
+                current_page = self.main_stack.currentWidget()
+                active_grid = current_page.findChild(FlexibleGridWidget)
+
+                grids_to_export = []
+                if active_grid:
+                    # Export just the active grid the user is viewing
+                    title = "--- SCHEDULE ---"
+                    for grade, data in self.grade_views.items():
+                        if data.get('grid') == active_grid:
+                            if self.current_section_filter and self.current_section_filter.startswith(grade):
+                                title = f"--- {self.current_section_filter.upper()} ---"
+                            else:
+                                title = f"--- {grade.upper()} (All Sections) ---"
+                            break
+                    grids_to_export.append((title, active_grid))
+                else:
+                    # If on Staff Tab, export a Master Schedule of all grades
+                    for grade, data in self.grade_views.items():
+                        grid = data.get('grid')
+                        if grid:
+                            title = f"--- {grade.upper()} (All Sections) ---"
+                            grids_to_export.append((title, grid))
+
+                if not grids_to_export:
+                    self.show_message("No schedule data available to export.")
+                    return
+
+                for title, flex_grid in grids_to_export:
+                    writer.writerow([title])
+                    headers = ["Time"] + flex_grid.days
                     writer.writerow(headers)
 
-                    # Write Rows
-                    for r in range(current_grid.rowCount()):
-                        row_data = [current_grid.verticalHeaderItem(r).text()]
-                        for c in range(current_grid.columnCount()):
-                            item = current_grid.item(r, c)
-                            row_data.append(item.text().replace("\n", " | ") if item else "")
-                        writer.writerow(row_data)
-                self.show_message("Export successful!")
-            except Exception as e:
-                QMessageBox.critical(self, "Export Error", f"Could not save file: {e}")
+                    max_rows = flex_grid.grid.rowCount()
+                    csv_data = [["" for _ in range(len(headers))] for _ in range(max_rows)]
+                    
+                    # Map rows to time slots based on the RESOLUTION_MINS
+                    for r in range(1, max_rows):
+                        total_mins = (r - 1) * flex_grid.RESOLUTION_MINS
+                        hour = flex_grid.START_HOUR + (total_mins // 60)
+                        minute = total_mins % 60
+                        csv_data[r][0] = f"{hour:02d}:{minute:02d}"
+
+                    # Loop through the grid items and plot them
+                    for i in range(flex_grid.grid.count()):
+                        item = flex_grid.grid.itemAt(i)
+                        if item:
+                            widget = item.widget()
+                            if widget and isinstance(widget, ClassBlockWidget):
+                                row, col, row_span, col_span = flex_grid.grid.getItemPosition(i)
+                                # Format text for a single cell by changing newlines to separators
+                                clean_text = widget.text().replace("\n", " | ")
+                                
+                                if row < max_rows and col < len(headers):
+                                    csv_data[row][col] = clean_text
+                                    # Add indicators for spanned rows
+                                    for span_r in range(row + 1, min(row + row_span, max_rows)):
+                                        csv_data[span_r][col] = "(Cont.)"
+
+                    # Print generated data to the file
+                    for r in range(1, max_rows):
+                        writer.writerow(csv_data[r])
+                        
+                    writer.writerow([]) # Blank row spacer between grades
+
+            self.show_message("Export successful!")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Could not save file: {e}")
 
     def init_schedule_grid_ui(self):
         """Bottom section for the Weekly Matrix."""
@@ -483,8 +596,8 @@ class MainWindow(QMainWindow):
             timetable_layout = QVBoxLayout(timetable_page)
             timetable_layout.setContentsMargins(0, 0, 0, 0)
             
-            grid = QTableWidget()
-            self._setup_grid(grid, days, self.time_slots)
+            grid = FlexibleGridWidget()
+            grid.block_clicked.connect(self.handle_block_click)
             timetable_layout.addWidget(grid)
             grade_stack.addWidget(timetable_page)
             
@@ -667,6 +780,84 @@ class MainWindow(QMainWindow):
                 self.refresh_all()
             else:
                 QMessageBox.warning(self, "Update Failed", "Could not update name in database.")
+                
+    def handle_block_click(self, info):
+        """Triggers when any class block inside the grid is clicked."""
+        if not info: return
+        
+        msg = f"Class: {info.get('grade_level')}\n"
+        msg += f"Subject: {info.get('subject')}\n"
+        msg += f"Teacher: {info.get('full_name')}\n"
+        msg += f"Time: {info.get('day')} {info.get('start_time')} - {info.get('end_time')}\n\n"
+        msg += "What would you like to do with this schedule block?"
+        
+        box = QMessageBox(self)
+        box.setWindowTitle("Manage Schedule")
+        box.setText(msg)
+        
+        edit_btn = box.addButton("Edit", QMessageBox.ButtonRole.ActionRole)
+        delete_btn = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        
+        box.exec()
+        
+        if box.clickedButton() == delete_btn:
+            success = self.engine.delete_specific_schedule(
+                info.get('person_id'),
+                info.get('day'),
+                info.get('start_time'),
+                info.get('end_time'),
+                info.get('grade_level')
+            )
+            if success:
+                self.refresh_all()
+                self.show_message("Schedule block deleted.")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to delete the schedule block.")
+        elif box.clickedButton() == edit_btn:
+            self.open_edit_schedule_dialog(info)
+            
+    def open_edit_schedule_dialog(self, info):
+        p_list = self.engine.get_all_persons()
+        all_options = list(self.known_classes)
+        
+        d = AddScheduleDialog(self.engine, p_list, available_classes=all_options, edit_info=info, parent=self)
+        
+        if self._exec_with_blur(d):
+            res = d.get_data()
+            if res is None: 
+                return
+
+            # Delete the old schedule block first
+            self.engine.delete_specific_schedule(
+                info.get('person_id'),
+                info.get('day'),
+                info.get('start_time'),
+                info.get('end_time'),
+                info.get('grade_level')
+            )
+            
+            from engine import ScheduleSlot
+            slots_to_add = []
+            for day_name in res['days']:
+                slots_to_add.append(ScheduleSlot(
+                    person_id=res['person_id'],
+                    day=day_name,
+                    start_time=res['start'],
+                    end_time=res['end'],
+                    grade_level=res['grade_level'],
+                    subject=res['subject'],
+                    room=res['room']
+                ))
+            
+            if self.engine.add_schedule_batch(slots_to_add):
+                self.show_message("Schedule successfully updated.")
+                
+                target_section = res.get('grade_level')
+                if target_section:
+                    self.on_sidebar_section_selected(target_section)
+                    
+                self.refresh_all()
 
     def _exec_with_blur(self, dialog):
         """Helper to execute a dialog with a background blur effect."""
@@ -953,116 +1144,57 @@ class MainWindow(QMainWindow):
         return teacher_conflicts, class_conflicts
 
     def refresh_grade_grid(self, grade_key, section_filter=None):
-        """Populates the grid for a specific grade view, optionally filtered by section."""
+        """Populates the flexible grid for a specific grade view, optionally filtered by section."""
         from datetime import datetime
         view_data = self.grade_views.get(grade_key)
         if not view_data: return 0
         
         grid = view_data['grid']
+        grid.clear_blocks()
+        schedules = self.engine.get_schedules_by_grade(grade_key, section_filter)
         
-        # Clear content AND spans (merges)
-        grid.clearContents()
-        grid.clearSpans()
+        is_dark = getattr(self, 'is_dark_mode', False)
+        default_text_color = "#FFFFFF" if is_dark else "#2c3e50"
         
-        s_map = self.engine.get_weekly_schedule_map()
-        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-        
-        local_conflicts = 0
-
-        # Process Column by Column (Day by Day) to allow vertical merging
-        for col, d_val in enumerate(days):
-            row = 0
-            while row < len(self.time_slots):
-                t_val = self.time_slots[row]
+        for info in schedules:
+            day = info['day']
+            start = info['start_time']
+            end = info['end_time']
+            subject = info.get('subject', '')
+            room = info.get('room', '')
+            name = info.get('full_name', '')
+            
+            try:
+                t1 = datetime.strptime(start, "%H:%M")
+                t2 = datetime.strptime(end, "%H:%M")
+                duration_mins = int((t2 - t1).total_seconds() / 60)
+            except Exception:
+                continue
                 
-                all_infos = s_map.get((d_val, t_val), [])
+            display_text = subject if subject else name
+            if subject and name:
+                display_text += f"\n({name})"
+            display_text += f"\n{duration_mins} mins"
+            if room:
+                display_text += f"\n[{room}]"
                 
-                if section_filter:
-                    busy_infos = [info for info in all_infos if section_filter == info.get('grade_level', '')]
-                else:
-                    busy_infos = [info for info in all_infos if grade_key in info.get('grade_level', '')]
-                
-                if not busy_infos:
-                    row += 1
-                    continue
-
-                info = busy_infos[0]
-                subject = info.get('subject', '')
-                room = info.get('room', '')
-                name = info['name']
-                is_conflict = len(busy_infos) > 1
-                
-                # --- 1. Calculate Merge Span ---
-                # Look ahead to see if the next slots are the exact same class
-                span_height = 1
-                if not is_conflict:
-                    for next_r in range(row + 1, len(self.time_slots)):
-                        next_t = self.time_slots[next_r]
-                        next_infos = s_map.get((d_val, next_t), [])
-                        if section_filter:
-                            next_busy = [i for i in next_infos if section_filter == i.get('grade_level', '')]
-                        else:
-                            next_busy = [i for i in next_infos if grade_key in i.get('grade_level', '')]
-                            
-                        # Stop if empty, conflict, or different subject/teacher
-                        if len(next_busy) == 1 and \
-                           next_busy[0]['name'] == name and \
-                           next_busy[0].get('subject', '') == subject:
-                            span_height += 1
-                        else:
-                            break
-
-                # --- 2. Determine Content ---
-                if is_conflict:
-                    display_text = "⚠️ CONFLICT\n" + "\n".join([f"{i['name']} ({i.get('range', '')})" for i in busy_infos])
-                else:
-                    duration_mins = self.calculate_duration(row, row + span_height)
-
-                    if duration_mins > 0:
-                        time_range = f"{duration_mins} mins"
-                    else:
-                        time_range = info.get('range', '')
-
-                    display_text = subject if subject else name
-                    if subject and name:
-                        display_text += f"\n({name})"
-                    if time_range:
-                        display_text += f"\n{time_range}"
-                    if room:
-                        display_text += f"\n[{room}]"
-
-                item = QTableWidgetItem(display_text)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                item.setFlags(item.flags() ^ Qt.ItemFlag.ItemIsEditable)
-                
-                # --- 3. Styling & Color Coding ---
-                if is_conflict:
-                    is_dark = getattr(self, 'is_dark_mode', False)
-                    conflict_bg_color = "#FF8A80" if is_dark else "#FF7043"
-                    item.setBackground(QBrush(QColor(conflict_bg_color)))
-                    item.setForeground(QBrush(QColor("white")))
-                    item.setToolTip("⚠️ Multiple people scheduled")
-                    local_conflicts += 1
-                else:
-                    # Dynamic Color based on Subject
-                    bg_color = self.get_subject_color(subject)
-                    item.setBackground(QBrush(bg_color))
-                    text_color = QColor("#FFFFFF") if getattr(self, 'is_dark_mode', False) else QColor("#2c3e50")
-                    item.setForeground(QBrush(text_color)) # Dark text
-                    item.setFont(QFont("Arial", weight=QFont.Weight.Bold))
-                    original_time = info.get('range', '')
-                    item.setToolTip(f"Subject: {subject}\nTeacher: {name}\nRoom: {room}\nTime: {original_time}")
-                
-                grid.setItem(row, col, item)
-
-                # --- 4. Apply Merge Span ---
-                if span_height > 1:
-                    grid.setSpan(row, col, span_height, 1)
-                
-                # Skip the rows we just handled
-                row += span_height
-        
-        return local_conflicts
+            bg_color_obj = self.get_subject_color(subject)
+            bg_color = bg_color_obj.name()
+            
+            tooltip = f"Subject: {subject}\nTeacher: {name}\nRoom: {room}\nTime: {start} - {end}"
+            
+            grid.add_class(
+                day_str=day,
+                start_time=start,
+                duration_mins=duration_mins,
+                display_text=display_text,
+                bg_color=bg_color,
+                text_color=default_text_color,
+                tooltip=tooltip,
+                schedule_info=info
+            )
+            
+        return 0
 
     def open_add_person_dialog(self):
         d = AddPersonDialog(self)

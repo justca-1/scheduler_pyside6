@@ -327,6 +327,49 @@ class ScheduleEngine:
             logging.error(f"Database error in get_weekly_schedule_map: {e}")
             return {}
 
+    def get_schedules_by_grade(self, grade_key: str, section_filter: str = None) -> List[Dict]:
+        """Fetches raw schedule records for a specific grade or section."""
+        query = """
+        SELECT p.full_name, p.role, s.person_id, s.day, s.start_time, s.end_time, s.grade_level, s.subject, s.room 
+        FROM Schedule s
+        JOIN Person p ON s.person_id = p.person_id
+        """
+        params = []
+        if section_filter:
+            query += " WHERE s.grade_level = ?"
+            params.append(section_filter)
+        elif grade_key:
+            query += " WHERE s.grade_level LIKE ?"
+            params.append(f"{grade_key}%")
+            
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logging.error(f"Error fetching schedules: {e}")
+            return []
+            
+    def get_schedules_by_person(self, person_id: int) -> List[Dict]:
+        """Fetches raw schedule records for a specific person."""
+        query = """
+        SELECT p.full_name, p.role, s.person_id, s.day, s.start_time, s.end_time, s.grade_level, s.subject, s.room 
+        FROM Schedule s
+        JOIN Person p ON s.person_id = p.person_id
+        WHERE s.person_id = ?
+        """
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute(query, (person_id,))
+                return [dict(row) for row in cursor.fetchall()]
+        except sqlite3.Error as e:
+            logging.error(f"Error fetching schedules: {e}")
+            return []
+
     def validate_workload(self, person_id: int) -> dict:
         """
         Calculates load per day to enforce the 6-hour (360 min) teaching limit.
@@ -435,6 +478,25 @@ class ScheduleEngine:
             if conn:
                 conn.rollback()
             logging.error(f"Clear Person Schedule Error: {e}")
+            return False
+        finally:
+            if conn:
+                conn.close()
+                
+    def delete_specific_schedule(self, person_id: int, day: str, start_time: str, end_time: str, grade_level: str) -> bool:
+        """Deletes a precise schedule block."""
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "DELETE FROM Schedule WHERE person_id = ? AND day = ? AND start_time = ? AND end_time = ? AND grade_level = ?",
+                (person_id, day, start_time, end_time, grade_level)
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        except sqlite3.Error as e:
+            logging.error(f"Delete Specific Schedule Error: {e}")
             return False
         finally:
             if conn:

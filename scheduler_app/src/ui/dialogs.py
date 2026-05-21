@@ -85,10 +85,11 @@ class AddClassDialog(QDialog):
         }
 
 class AddScheduleDialog(QDialog):
-    def __init__(self, engine, persons: list, available_classes: list = None, parent=None):
+    def __init__(self, engine, persons: list, available_classes: list = None, edit_info: dict = None, parent=None):
         super().__init__(parent)
         self.engine = engine # Store engine for conflict checking
-        self.setWindowTitle("Add Busy Time (Multi-Day)")
+        self.edit_info = edit_info
+        self.setWindowTitle("Add Busy Time (Multi-Day)" if not edit_info else "Edit Schedule Block")
         layout = QVBoxLayout(self)
 
         # 1. MULTI-DAY SELECTION
@@ -159,6 +160,28 @@ class AddScheduleDialog(QDialog):
         self.btn_save.clicked.connect(self.accept)
         layout.addWidget(self.btn_save)
         
+        if self.edit_info:
+            self.btn_save.setText("Update Schedule")
+            
+            day = self.edit_info.get('day')
+            if day in self.day_boxes:
+                self.day_boxes[day].setChecked(True)
+                
+            person_id = self.edit_info.get('person_id')
+            idx = self.person_selector.findData(person_id)
+            if idx >= 0:
+                self.person_selector.setCurrentIndex(idx)
+                
+            grade = self.edit_info.get('grade_level')
+            self.grade_selector.setCurrentText(grade)
+            self.subject_input.setText(self.edit_info.get('subject', ''))
+            self.room_input.setText(self.edit_info.get('room', ''))
+            
+            start = self.edit_info.get('start_time', '09:00')
+            end = self.edit_info.get('end_time', '10:00')
+            self.start_time.setTime(QTime.fromString(start, "HH:mm"))
+            self.end_time.setTime(QTime.fromString(end, "HH:mm"))
+            
         # Trigger initial validation to set default states (e.g., Grey-Out strategy)
         self.check_conflicts()
 
@@ -208,17 +231,27 @@ class AddScheduleDialog(QDialog):
                 # Query Engine for detailed conflicts
                 conflicts = self.engine.get_conflict_details(person_id, day, start, end)
                 if conflicts:
-                    conflicting_days.append(day)
-                    for c in conflicts:
-                        grade = c.get('grade_level', 'Unknown Class')
-                        subject = c.get('subject') or 'No Subject'
-                        c_start = c.get('start_time')
-                        c_end = c.get('end_time')
-                        room = c.get('room')
-                        room_text = f" in {room}" if room else ""
+                    if self.edit_info:
+                        conflicts = [c for c in conflicts if not (
+                            c.get('grade_level') == self.edit_info.get('grade_level') and
+                            c.get('start_time') == self.edit_info.get('start_time') and
+                            c.get('end_time') == self.edit_info.get('end_time') and
+                            c.get('day') == self.edit_info.get('day') and
+                            c.get('person_id') == self.edit_info.get('person_id')
+                        )]
                         
-                        # Detailed "End Game" Conflict Message
-                        tooltip_lines.append(f"⚠️ Conflict Detected: Teacher {person_name} is already{room_text} teaching {subject} ({grade}) from {c_start} to {c_end} on {day}.")
+                    if conflicts:
+                        conflicting_days.append(day)
+                        for c in conflicts:
+                            grade = c.get('grade_level', 'Unknown Class')
+                            subject = c.get('subject') or 'No Subject'
+                            c_start = c.get('start_time')
+                            c_end = c.get('end_time')
+                            room = c.get('room')
+                            room_text = f" in {room}" if room else ""
+                            
+                            # Detailed "End Game" Conflict Message
+                            tooltip_lines.append(f"⚠️ Conflict Detected: Teacher {person_name} is already{room_text} teaching {subject} ({grade}) from {c_start} to {c_end} on {day}.")
 
         # Visual Feedback
         if conflicting_days:
@@ -272,25 +305,19 @@ class PersonScheduleDialog(QDialog):
     """Displays a read-only weekly schedule for a specific person."""
     def __init__(self, engine, person_id, name, parent=None):
         super().__init__(parent)
+        self.engine = engine
         self.setWindowTitle(f"Schedule: {name}")
         self.resize(900, 600)
         layout = QVBoxLayout(self)
         
         # Grid Setup
-        self.grid = QTableWidget()
-        self.grid.setColumnCount(5)
-        self.grid.setHorizontalHeaderLabels(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"])
-        
-        # Time slots (Consistent with Main Window)
-        self.time_slots = [f"{h:02d}:{m:02d}" for h in range(6, 19) for m in (0, 30)]
-        self.grid.setRowCount(len(self.time_slots))
-        self.grid.setVerticalHeaderLabels(self.time_slots)
-        
-        # Increase dimensions for better readability
-        self.grid.verticalHeader().setDefaultSectionSize(50)
-        self.grid.verticalHeader().setFixedWidth(55)
-        
-        self.grid.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        try:
+            from .main_window import FlexibleGridWidget
+        except ImportError:
+            from ui.main_window import FlexibleGridWidget
+            
+        self.grid = FlexibleGridWidget()
+        self.grid.block_clicked.connect(self.handle_block_click)
         layout.addWidget(self.grid)
         
         # Load Data
@@ -299,100 +326,116 @@ class PersonScheduleDialog(QDialog):
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
+        
+    def handle_block_click(self, info):
+        if not info: return
+        
+        msg = f"Class: {info.get('grade_level')}\n"
+        msg += f"Subject: {info.get('subject')}\n"
+        msg += f"Teacher: {info.get('full_name')}\n"
+        msg += f"Time: {info.get('day')} {info.get('start_time')} - {info.get('end_time')}\n\n"
+        msg += "What would you like to do with this schedule block?"
+        
+        box = QMessageBox(self)
+        box.setWindowTitle("Manage Schedule")
+        box.setText(msg)
+        
+        edit_btn = box.addButton("Edit", QMessageBox.ButtonRole.ActionRole)
+        delete_btn = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        
+        box.exec()
+        
+        if box.clickedButton() == delete_btn:
+            success = self.engine.delete_specific_schedule(
+                info.get('person_id'), info.get('day'), 
+                info.get('start_time'), info.get('end_time'), 
+                info.get('grade_level')
+            )
+            if success:
+                self.load_data(self.engine, info.get('person_id'))
+                if self.parent() and hasattr(self.parent(), 'refresh_all'):
+                    self.parent().refresh_all()
+        elif box.clickedButton() == edit_btn:
+            p_list = self.engine.get_all_persons()
+            all_options = []
+            if self.parent() and hasattr(self.parent(), 'known_classes'):
+                all_options = list(self.parent().known_classes)
+                
+            d = AddScheduleDialog(self.engine, p_list, available_classes=all_options, edit_info=info, parent=self)
+            if d.exec():
+                res = d.get_data()
+                if res:
+                    self.engine.delete_specific_schedule(
+                        info.get('person_id'), info.get('day'), 
+                        info.get('start_time'), info.get('end_time'), 
+                        info.get('grade_level')
+                    )
+                    try:
+                        from engine import ScheduleSlot
+                    except ImportError:
+                        from scheduler_app.src.engine import ScheduleSlot
+                        
+                    slots_to_add = []
+                    for day_name in res['days']:
+                        slots_to_add.append(ScheduleSlot(
+                            person_id=res['person_id'],
+                            day=day_name,
+                            start_time=res['start'],
+                            end_time=res['end'],
+                            grade_level=res['grade_level'],
+                            subject=res['subject'],
+                            room=res['room']
+                        ))
+                    if self.engine.add_schedule_batch(slots_to_add):
+                        self.load_data(self.engine, info.get('person_id'))
+                        if self.parent() and hasattr(self.parent(), 'refresh_all'):
+                            self.parent().refresh_all()
 
     def load_data(self, engine, person_id):
         from datetime import datetime
         
-        # Reuse the engine's map logic, filtered by this person
-        s_map = engine.get_weekly_schedule_map(person_id=person_id)
-        days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        schedules = engine.get_schedules_by_person(person_id)
+        self.grid.clear_blocks()
         
-        self.grid.clearContents()
-        self.grid.clearSpans()
-        
-        for col, d_val in enumerate(days):
-            row = 0
-            while row < len(self.time_slots):
-                t_val = self.time_slots[row]
-                infos = s_map.get((d_val, t_val), [])
+        for info in schedules:
+            day = info['day']
+            start = info['start_time']
+            end = info['end_time']
+            subject = info.get('subject', '')
+            room = info.get('room', '')
+            grade_level = info.get('grade_level', '')
+            
+            try:
+                t1 = datetime.strptime(start, "%H:%M")
+                t2 = datetime.strptime(end, "%H:%M")
+                duration_mins = int((t2 - t1).total_seconds() / 60)
+            except Exception:
+                continue
                 
-                if not infos:
-                    row += 1
-                    continue
-                    
-                is_conflict = len(infos) > 1
+            display_text = grade_level if grade_level else "Unknown Class"
+            if subject:
+                display_text += f"\n{subject}"
+            display_text += f"\n{duration_mins} mins"
+            if room:
+                display_text += f"\n[{room}]"
                 
-                # --- Calculate Merge Span ---
-                span_height = 1
-                if not is_conflict:
-                    info = infos[0]
-                    for next_r in range(row + 1, len(self.time_slots)):
-                        next_t = self.time_slots[next_r]
-                        next_infos = s_map.get((d_val, next_t), [])
-                        
-                        if len(next_infos) == 1 and \
-                           next_infos[0].get('grade_level', '') == info.get('grade_level', '') and \
-                           next_infos[0].get('subject', '') == info.get('subject', ''):
-                            span_height += 1
-                        else:
-                            break
-                            
-                # --- Build Display Text ---
-                if is_conflict:
-                    text = "\n".join([f"{x['grade_level']} ({x['role']})\n{x['range']}" for x in infos])
-                    text += "\n(Double Booked!)"
-                else:
-                    info = infos[0]
-                    # Calculate true total minutes across the entire merged span
-                    unique_ranges = set()
-                    for r in range(row, row + span_height):
-                        t_slot = self.time_slots[r]
-                        for x in s_map.get((d_val, t_slot), []):
-                            if x.get('grade_level', '') == info.get('grade_level', ''):
-                                unique_ranges.add(x.get('range', ''))
-                                    
-                    duration_mins = 0
-                    for rng in unique_ranges:
-                        if not rng: continue
-                        try:
-                            t1 = datetime.strptime(rng.split(" - ")[0], "%H:%M")
-                            t2 = datetime.strptime(rng.split(" - ")[1], "%H:%M")
-                            duration_mins += int((t2 - t1).total_seconds() / 60)
-                        except Exception:
-                            pass
-                            
-                    if duration_mins > 0:
-                        duration_text = f"{duration_mins} mins"
-                    else:
-                        duration_text = info.get('range', '')
-                        
-                    text = f"{info['grade_level']} ({info['role']})\n{duration_text}"
-                    if info.get('subject'):
-                        text += f"\n{info['subject']}"
-                        
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                
-                if is_conflict:
-                    is_dark = getattr(self.parent(), 'is_dark_mode', False)
-                    conflict_color = "#FF8A80" if is_dark else "#FF7043"
-                    item.setBackground(QBrush(QColor(conflict_color)))
-                    item.setForeground(QBrush(QColor("white")))
-                else:
-                    # Generate varying colors based on the Grade Level (instead of subject)
-                    val = sum(map(ord, info.get('grade_level', '')))
-                    hue = (val * 137) % 360
-                    is_dark = getattr(self.parent(), 'is_dark_mode', False)
-                    
-                    bg_color = QColor.fromHsl(hue, 120 if is_dark else 100, 80 if is_dark else 230)
-                    text_color = QColor("#FFFFFF") if is_dark else QColor("#121212")
-                    
-                    item.setBackground(QBrush(bg_color))
-                    item.setForeground(QBrush(text_color))
-                    
-                self.grid.setItem(row, col, item)
-                
-                if span_height > 1:
-                    self.grid.setSpan(row, col, span_height, 1)
-                    
-                row += span_height
+            val = sum(map(ord, grade_level))
+            hue = (val * 137) % 360
+            is_dark = getattr(self.parent(), 'is_dark_mode', False)
+            
+            bg_color = QColor.fromHsl(hue, 120 if is_dark else 100, 80 if is_dark else 230).name()
+            text_color = "#FFFFFF" if is_dark else "#121212"
+            
+            tooltip = f"Class: {grade_level}\nSubject: {subject}\nRoom: {room}\nTime: {start} - {end}"
+            
+            self.grid.add_class(
+                day_str=day,
+                start_time=start,
+                duration_mins=duration_mins,
+                display_text=display_text,
+                bg_color=bg_color,
+                text_color=text_color,
+                tooltip=tooltip,
+                schedule_info=info
+            )
